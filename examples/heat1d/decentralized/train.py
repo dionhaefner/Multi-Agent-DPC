@@ -82,12 +82,15 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
 
 # --- 3. Training Loop ---
 with solver_ts:
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=False) # Training without tesseract for speed
+    # here's the thing: if we set use_tesseract=False, the dynamics will use JAX backend for differentiation and that takes a couple of minutes on a rtx5090
+    # but using the tesseract (use_tesseract=True) for differentiation is much slower due to the overhead of communication (on pietro's laptop that is around 4 minutes per iteration, which is not feasible for training)
+    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True) # One can use JAX in our case for the training
 
     print("Generating dataset...")
     all_keys = jax.random.split(key, 5000)
     _, z_init_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.2))(all_keys)
     _, z_target_all = jax.vmap(partial(generate_grf, n_points=n_pde, length_scale=0.4))(all_keys)
+    print("Dataset generated.")
     
     # Initialize agents spatially across the domain [0.2, 0.8]
     xi_init_single = jnp.linspace(0.2, 0.8, n_agents)
