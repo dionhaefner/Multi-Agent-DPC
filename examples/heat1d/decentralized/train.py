@@ -24,7 +24,8 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 # --- 1. Initialization ---
-solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
+# solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
+solver_ts = Tesseract.from_tesseract_api(script_dir / "tesseracts/solverHeat_decentralized/tesseract_api.py")
 n_pde, n_agents, batch_size = 100, 8, 32
 T_steps = 300
 R_safe = 0.05
