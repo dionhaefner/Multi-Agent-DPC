@@ -28,7 +28,7 @@ class PDEDynamics:
                 "t_steps": t_steps
             }
             
-            results = apply_tesseract(self.solver_ts, inputs)
+            results = apply_tesseract(self.solver_ts, inputs, vmap_method="broadcast_all")
             return (
                 results["z_trajectory"], 
                 results["xi_trajectory"], 

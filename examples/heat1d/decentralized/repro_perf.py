@@ -54,7 +54,7 @@ params = model.init(key, jnp.zeros((n_pde,)), jnp.zeros((n_pde,)), jnp.zeros((n_
 # ============================================================
 # Three forward+backward paths
 # ============================================================
-def loss_via_tesseract(params, z_init, xi_init, z_target, solver_ts, vectorized=False):
+def loss_via_tesseract(params, z_init, xi_init, z_target, solver_ts, vmap_method=None):
     """Forward+backward through apply_tesseract."""
     flat_params, _ = ravel_pytree(params)
     inputs = {
@@ -64,7 +64,7 @@ def loss_via_tesseract(params, z_init, xi_init, z_target, solver_ts, vectorized=
         "flat_params": flat_params,
         "t_steps": T_steps,
     }
-    results = apply_tesseract(solver_ts, inputs, vectorized=vectorized)
+    results = apply_tesseract(solver_ts, inputs, vmap_method=vmap_method)
     z_traj = results["z_trajectory"]
     return jnp.mean((z_traj - z_target[None, :]) ** 2)
 
@@ -77,12 +77,12 @@ def loss_native(params, z_init, xi_init, z_target):
     return jnp.mean((z_traj - z_target[None, :]) ** 2)
 
 
-def build_step_tesseract(solver_ts, use_grad, vectorized=False):
+def build_step_tesseract(solver_ts, use_grad, vmap_method=None):
     """Build a jitted, vmapped step going through apply_tesseract."""
     @partial(jax.jit, static_argnames="solver_ts")
     def step_grad(params, z_init_b, xi_init_b, z_target_b, solver_ts):
         batched = jax.vmap(
-            lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vectorized=vectorized),
+            lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vmap_method=vmap_method),
             in_axes=(None, 0, 0, 0, None),
         )
         def mean_loss(p):
@@ -93,7 +93,7 @@ def build_step_tesseract(solver_ts, use_grad, vectorized=False):
     @partial(jax.jit, static_argnames="solver_ts")
     def step_fwd(params, z_init_b, xi_init_b, z_target_b, solver_ts):
         batched = jax.vmap(
-            lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vectorized=vectorized),
+            lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vmap_method=vmap_method),
             in_axes=(None, 0, 0, 0, None),
         )
         loss = jnp.mean(batched(params, z_init_b, xi_init_b, z_target_b, solver_ts))
@@ -284,15 +284,15 @@ def run_dissect(api_path=None):
     print(f"=== [F] Native jit(vmap(value_and_grad)) batch={batch_size} ===")
     bench_raw(lambda: step_native_grad(*data))
 
-    # --- G. jit(vmap(value_and_grad(apply_tesseract))) batch=4 with vectorized=True ---
+    # --- G. jit(vmap(value_and_grad(apply_tesseract))) batch=4 with vmap_method="broadcast_all" ---
     #     (single callback per batch instead of one per sample)
-    print(f"=== [G] jit(vmap(value_and_grad(apply_tesseract))) batch={batch_size}, vectorized=True ===")
+    print(f"=== [G] jit(vmap(value_and_grad(apply_tesseract))) batch={batch_size}, vmap_method='broadcast_all' ===")
     solver_ts4 = Tesseract.from_tesseract_api(api_path)
     with solver_ts4:
         @partial(jax.jit, static_argnames="solver_ts")
         def step_vectorized(params, z_init_b, xi_init_b, z_target_b, solver_ts):
             batched = jax.vmap(
-                lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vectorized=True),
+                lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vmap_method="broadcast_all"),
                 in_axes=(None, 0, 0, 0, None),
             )
             def mean_loss(p):
@@ -301,14 +301,14 @@ def run_dissect(api_path=None):
             return loss, grads
         bench_raw(lambda: step_vectorized(data[0], data[1], data[2], data[3], solver_ts4))
 
-    # --- H. jit(vmap(grad(apply_tesseract))) batch=N, vectorized=True (grad only, no value) ---
-    print(f"=== [H] jit(vmap(grad(apply_tesseract))) batch={batch_size}, vectorized=True (grad only) ===")
+    # --- H. jit(vmap(grad(apply_tesseract))) batch=N, vmap_method="broadcast_all" (grad only, no value) ---
+    print(f"=== [H] jit(vmap(grad(apply_tesseract))) batch={batch_size}, vmap_method='broadcast_all' (grad only) ===")
     solver_ts5 = Tesseract.from_tesseract_api(api_path)
     with solver_ts5:
         @partial(jax.jit, static_argnames="solver_ts")
         def step_grad_only(params, z_init_b, xi_init_b, z_target_b, solver_ts):
             batched = jax.vmap(
-                lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vectorized=True),
+                lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vmap_method="broadcast_all"),
                 in_axes=(None, 0, 0, 0, None),
             )
             def mean_loss(p):
@@ -334,7 +334,7 @@ def run_batch_sweep(api_path=None):
     sizes = [1, 2, 4, 8, 16, 32]
     n_iter = 5
 
-    print(f"{'batch':>5}  {'G (vectorized)':>14}  {'N (noop tess)':>14}  {'F (native)':>14}  {'G/F':>5}  {'N/F':>5}")
+    print(f"{'batch':>5}  {'G (broadcast)':>14}  {'N (noop tess)':>14}  {'F (native)':>14}  {'G/F':>5}  {'N/F':>5}")
     print("-" * 78)
 
     for bs in sizes:
@@ -349,7 +349,7 @@ def run_batch_sweep(api_path=None):
             @partial(jax.jit, static_argnames="solver_ts")
             def step_g(params, z_b, xi_b, zt_b, solver_ts):
                 batched = jax.vmap(
-                    lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vectorized=True),
+                    lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vmap_method="broadcast_all"),
                     in_axes=(None, 0, 0, 0, None),
                 )
                 def mean_loss(p):
@@ -370,7 +370,7 @@ def run_batch_sweep(api_path=None):
             @partial(jax.jit, static_argnames="solver_ts")
             def step_n(params, z_b, xi_b, zt_b, solver_ts):
                 batched = jax.vmap(
-                    lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vectorized=True),
+                    lambda p, z, xi, zt, ts: loss_via_tesseract(p, z, xi, zt, ts, vmap_method="broadcast_all"),
                     in_axes=(None, 0, 0, 0, None),
                 )
                 def mean_loss(p):
@@ -471,33 +471,33 @@ def bench(step_fn, n_warmup=1, n_iter=3):
 # ============================================================
 # Main
 # ============================================================
-def run_from_image(use_grad, vectorized=False):
-    vtag = ", vectorized" if vectorized else ""
+def run_from_image(use_grad, vmap_method=None):
+    vtag = f", vmap_method='{vmap_method}'" if vmap_method else ""
     tag = "fwd+bwd" if use_grad else "fwd only"
     print(f"=== Mode: Tesseract.from_image (Docker) [{tag}{vtag}] ===")
-    if vectorized:
+    if vmap_method:
         print("  NOTE: Docker image must be rebuilt with Array[..., Float32] schemas")
         print("  Run: tesseract build tesseracts/solverHeat_decentralized -t solver_heat_decentralized:latest")
     solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
     with solver_ts:
-        step = build_step_tesseract(solver_ts, use_grad, vectorized=vectorized)
+        step = build_step_tesseract(solver_ts, use_grad, vmap_method=vmap_method)
         step_fn = lambda p, z, xi, zt: step(p, z, xi, zt, solver_ts)
         bench(step_fn)
 
 
-def run_from_api(use_grad, vectorized=False, api_path=None):
+def run_from_api(use_grad, vmap_method=None, api_path=None):
     api_path = api_path or TESSERACT_API_PATHS["solver"]
-    vtag = ", vectorized" if vectorized else ""
+    vtag = f", vmap_method='{vmap_method}'" if vmap_method else ""
     tag = "fwd+bwd" if use_grad else "fwd only"
     print(f"=== Mode: Tesseract.from_tesseract_api (LocalClient) [{tag}{vtag}, {api_path.name}] ===")
     solver_ts = Tesseract.from_tesseract_api(api_path)
     with solver_ts:
-        step = build_step_tesseract(solver_ts, use_grad, vectorized=vectorized)
+        step = build_step_tesseract(solver_ts, use_grad, vmap_method=vmap_method)
         step_fn = lambda p, z, xi, zt: step(p, z, xi, zt, solver_ts)
         bench(step_fn)
 
 
-def run_native(use_grad, vectorized=False):
+def run_native(use_grad, vmap_method=None):
     tag = "fwd+bwd" if use_grad else "fwd only"
     print(f"=== Mode: Native JAX (no tesseract) [{tag}] ===")
     step = step_native_grad if use_grad else step_native_fwd
@@ -519,9 +519,10 @@ def main():
         help="Forward pass only (no value_and_grad) — only applies to non-raw modes",
     )
     parser.add_argument(
-        "--vectorized",
-        action="store_true",
-        help="Use vectorized=True for apply_tesseract (single callback per batch)",
+        "--vmap-method",
+        choices=["sequential", "expand_dims", "broadcast_all", "auto_experimental"],
+        default=None,
+        help="vmap_method for apply_tesseract (e.g. 'broadcast_all' for single callback per batch)",
     )
     parser.add_argument(
         "--tesseract",
@@ -531,6 +532,7 @@ def main():
     )
     args = parser.parse_args()
     use_grad = not args.no_grad
+    vmap_method = args.vmap_method
     api_path = TESSERACT_API_PATHS[args.tesseract]
 
     grad_modes = {
@@ -568,16 +570,16 @@ def main():
         for name, run in grad_modes.items():
             try:
                 if name == "from_api":
-                    run(use_grad, vectorized=args.vectorized, api_path=api_path)
+                    run(use_grad, vmap_method=vmap_method, api_path=api_path)
                 else:
-                    run(use_grad, vectorized=args.vectorized)
+                    run(use_grad, vmap_method=vmap_method)
             except Exception as e:
                 print(f"  skipping {name}: {e}\n")
     else:
         if args.mode == "from_api":
-            grad_modes[args.mode](use_grad, vectorized=args.vectorized, api_path=api_path)
+            grad_modes[args.mode](use_grad, vmap_method=vmap_method, api_path=api_path)
         else:
-            grad_modes[args.mode](use_grad, vectorized=args.vectorized)
+            grad_modes[args.mode](use_grad, vmap_method=vmap_method)
 
 
 if __name__ == "__main__":
