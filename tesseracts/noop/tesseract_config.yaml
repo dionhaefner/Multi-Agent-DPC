@@ -1,6 +1,0 @@
-name: "noop"
-version: "0.1.0"
-description: "No-op tesseract for benchmarking framework overhead"
-
-build_config:
-  target_platform: "native"

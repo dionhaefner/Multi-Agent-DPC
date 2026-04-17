@@ -24,8 +24,10 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 # --- 1. Initialization ---
-# solver_ts = Tesseract.from_image("solver_heat_decentralized:latest")
-solver_ts = Tesseract.from_tesseract_api(script_dir / "tesseracts/solverHeat_decentralized/tesseract_api.py")
+# Option 1: Use built image via Docker (make sure to build the tesseract first with `tesseract build -t solver_heat_decentralized`)
+solver_ts = Tesseract.from_image("solver_heat_decentralized:latest", stream_logs=True)
+# Option 2: Use local tesseract API (less overhead for debugging, but no isolated environment)
+# solver_ts = Tesseract.from_tesseract_api(script_dir / "tesseracts/solverHeat_decentralized/tesseract_api.py", stream_logs=True)
 n_pde, n_agents, batch_size = 100, 8, 32
 T_steps = 300
 R_safe = 0.05
@@ -45,23 +47,23 @@ def loss_fn(params, z_init, xi_init, z_target, dynamics):
     z_traj, xi_traj, u_traj, v_traj = dynamics.unroll_controlled(
         z_init, xi_init, z_target, params, T_steps
     )
-    
+
     # 1. Tracking Loss
     l_track = jnp.mean((z_traj - z_target[None, :]) ** 2)
-    
+
     # 2. Effort Loss
     l_effort = jnp.mean(u_traj ** 2) + 0.1 * jnp.mean(v_traj ** 2)
-    
+
     # 3. Boundary Penalty
     margin = 0.02
-    l_bound = jnp.mean(jnp.maximum(0, margin - xi_traj)**2 + 
+    l_bound = jnp.mean(jnp.maximum(0, margin - xi_traj)**2 +
                        jnp.maximum(0, xi_traj - (1.0 - margin))**2)
-    
+
     # 4. Collision Avoidance
     dists = jnp.abs(xi_traj[:, :, None] - xi_traj[:, None, :])
     mask = jnp.eye(n_agents)[None, :, :]
     l_coll = jnp.mean(jnp.maximum(0, R_safe - (dists + mask * 1.0)) ** 2)
-    
+
     # 5. Damping (Acceleration)
     l_accel = jnp.mean(jnp.diff(v_traj, axis=0)**2)
 
@@ -71,7 +73,7 @@ def loss_fn(params, z_init, xi_init, z_target, dynamics):
 @partial(jax.jit, static_argnames='dynamics')
 def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, dynamics):
     batched_loss_fn = jax.vmap(loss_fn, in_axes=(None, 0, 0, 0, None))
-    
+
     def mean_loss_fn(p):
         losses, auxs = batched_loss_fn(p, z_init_batch, xi_init_batch, z_target_batch, dynamics)
         return jnp.mean(losses), jax.tree_util.tree_map(jnp.mean, auxs)
