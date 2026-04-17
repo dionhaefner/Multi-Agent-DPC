@@ -1,5 +1,9 @@
+import collections
+import hashlib
 import sys
 import os
+import threading
+from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
@@ -9,7 +13,11 @@ from pydantic import BaseModel, Field, ConfigDict
 from jax.flatten_util import ravel_pytree
 
 from tesseract_core.runtime import Array, Differentiable, Float32
-from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
+from tesseract_core.runtime.tree_transforms import (
+    filter_func,
+    flatten_with_paths,
+    set_at_path,
+)
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 import solver
@@ -51,6 +59,72 @@ class OutputSchema(BaseModel):
     xi_trajectory: Differentiable[Array[..., Float32]]
     u_trajectory: Differentiable[Array[..., Float32]]
     v_trajectory: Differentiable[Array[..., Float32]]
+
+
+#
+# VJP residual caching
+#
+# When computing gradients of a loss applied to Tesseract outputs, both apply()
+# and vector_jacobian_product() are called. Without caching, VJP recomputes the
+# forward pass internally to obtain residuals. This cache stores the VJP function
+# (with residuals) from apply() so the subsequent VJP call can skip recomputation.
+# See: https://github.com/pasteurlabs/tesseract-jax/issues/27
+#
+
+
+class _VJPCache:
+    """Thread-safe LRU cache for VJP residuals from recent apply calls.
+
+    Each apply() call stores a vjp_func (with captured residuals) keyed by
+    a hash of the inputs. A subsequent vector_jacobian_product() call with
+    matching inputs can reuse the cached vjp_func instead of recomputing
+    the forward pass.
+
+    Args:
+        maxsize: Maximum number of cached entries. Set to 0 to disable caching.
+            When the cache is full, the least-recently-used entry is evicted.
+    """
+
+    def __init__(self, maxsize: int = 1):
+        self._maxsize = maxsize
+        self._lock = threading.Lock()
+        self._cache: collections.OrderedDict[
+            bytes, tuple[Callable, dict]
+        ] = collections.OrderedDict()
+
+    def put(
+        self, key: bytes, vjp_func: Callable, cotangent_template: dict
+    ) -> None:
+        if self._maxsize <= 0:
+            return
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            self._cache[key] = (vjp_func, cotangent_template)
+            while len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
+
+    def pop(self, key: bytes) -> tuple[Callable, dict] | None:
+        with self._lock:
+            return self._cache.pop(key, None)
+
+
+# Set maxsize=0 to disable caching, or increase for workloads that
+# interleave apply() calls before their corresponding VJP calls.
+_vjp_cache = _VJPCache(maxsize=1)
+
+
+def _hash_inputs(inputs_dict: dict) -> bytes:
+    """Compute a SHA-256 hash of a pytree of inputs for cache key comparison."""
+    h = hashlib.sha256()
+    leaves, treedef = jax.tree.flatten(inputs_dict)
+    h.update(str(treedef).encode())
+    for leaf in leaves:
+        if hasattr(leaf, "tobytes"):
+            h.update(leaf.tobytes())
+        else:
+            h.update(str(leaf).encode())
+    return h.digest()
 
 
 #
@@ -96,7 +170,26 @@ def apply_jit(inputs: dict) -> dict:
 
 
 def apply(inputs: InputSchema) -> dict:
-    return apply_jit(inputs.model_dump())
+    inputs_dict = inputs.model_dump()
+
+    # Compute forward pass via jax.vjp to cache residuals for a potential
+    # subsequent vector_jacobian_product call. eqx.partition separates
+    # array (differentiable) from non-array outputs; has_aux tells jax.vjp
+    # to only differentiate through the array outputs.
+    def _apply_for_vjp(inputs_dict):
+        out = apply_jit(inputs_dict)
+        diff_out, static_out = eqx.partition(out, eqx.is_array)
+        return diff_out, static_out
+
+    (diff_primals, vjp_func, static_primals) = jax.vjp(
+        _apply_for_vjp, inputs_dict, has_aux=True
+    )
+    out = eqx.combine(diff_primals, static_primals)
+
+    cotangent_template = jax.tree.map(jnp.zeros_like, diff_primals)
+    _vjp_cache.put(_hash_inputs(inputs_dict), vjp_func, cotangent_template)
+
+    return out
 
 
 #
@@ -132,8 +225,23 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ):
+    inputs_dict = inputs.model_dump()
+
+    # Check for cached VJP residuals from a prior apply call
+    cached = _vjp_cache.pop(_hash_inputs(inputs_dict))
+    if cached is not None:
+        vjp_func, cotangent_template = cached
+
+        # Build full cotangent from template, zeroing outputs not in vjp_outputs
+        full_cotangent = jax.tree.map(jnp.zeros_like, cotangent_template)
+        full_cotangent = set_at_path(full_cotangent, cotangent_vector)
+
+        (all_input_cotangents,) = vjp_func(full_cotangent)
+        return flatten_with_paths(all_input_cotangents, include_paths=vjp_inputs)
+
+    # Cache miss: fall back to original JIT-compiled path
     return vjp_jit(
-        inputs.model_dump(),
+        inputs_dict,
         tuple(vjp_inputs),
         tuple(vjp_outputs),
         cotangent_vector,
