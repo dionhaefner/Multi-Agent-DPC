@@ -3,11 +3,16 @@ Decentralized Deep Policy Control Training Script for 1D Heat Equation:
 trains a ControlNet policy to manage agent positions and forcing intensities
 to steer the FKPP dynamics towards target states while respecting constraints.
 """
+import os
+
+# The training loop and the solver share one GPU, so neither JAX process should
+# claim 75% of its memory at startup (from_source passes this on to the solver).
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 import jax
 import jax.numpy as jnp
 from tesseract_core import Tesseract
 import sys
-import os
 from pathlib import Path
 import optax
 import time
@@ -24,10 +29,19 @@ from models.policy import DecentralizedControlNet
 from data_utils import generate_grf
 
 # --- 1. Initialization ---
-# Option 1: Use built image via Docker (make sure to build the tesseract first with `tesseract build -t solver_heat_decentralized`)
-solver_ts = Tesseract.from_image("solver_heat_decentralized:latest", stream_logs=True)
-# Option 2: Use local tesseract API (less overhead for debugging, but no isolated environment)
-# solver_ts = Tesseract.from_tesseract_api(script_dir / "tesseracts/solverHeat_decentralized/tesseract_api.py", stream_logs=True)
+# Arrays cross the process boundary as CUDA IPC handles instead of through host memory.
+GPU_TRANSPORT = "cuda_ipc"
+# Option 1: Serve the Tesseract in a subprocess that uses this interpreter, and with it
+# the same CUDA-enabled JAX as the training loop.
+solver_ts = Tesseract.from_source(
+    script_dir / "tesseracts/solverHeat_decentralized/tesseract_api.py",
+    python_executable=sys.executable,
+    gpu_transport=GPU_TRANSPORT,
+)
+# Option 2: Use built image via Docker (make sure to build the tesseract first with `tesseract build -t solver_heat_decentralized`)
+# solver_ts = Tesseract.from_image("solver_heat_decentralized:latest", gpus=["all"], gpu_transport=GPU_TRANSPORT)
+# Option 3: Use local tesseract API (less overhead for debugging, but no isolated environment)
+# solver_ts = Tesseract.from_tesseract_api(script_dir / "tesseracts/solverHeat_decentralized/tesseract_api.py")
 n_pde, n_agents, batch_size = 100, 8, 32
 T_steps = 300
 R_safe = 0.05
@@ -87,7 +101,7 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
 with solver_ts:
     # here's the thing: if we set use_tesseract=False, the dynamics will use JAX backend for differentiation and that takes a couple of minutes on a rtx5090
     # but using the tesseract (use_tesseract=True) for differentiation is much slower due to the overhead of communication (on pietro's laptop that is around 4 minutes per iteration, which is not feasible for training)
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True) # One can use JAX in our case for the training
+    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True, gpu_transport=GPU_TRANSPORT) # One can use JAX in our case for the training
 
     print("Generating dataset...")
     all_keys = jax.random.split(key, 5000)
