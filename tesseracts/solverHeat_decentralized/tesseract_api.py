@@ -99,22 +99,9 @@ def apply_jit(inputs: dict) -> dict:
     }
 
 
-# --- 3. Adopting GPU inputs ---
-# With gpu_transport="cuda_ipc", arrays arrive as framework-agnostic device arrays.
-# JAX adopts them without a copy through DLPack, but won't accept them as they are.
-def _adopt(x: Any) -> Any:
-    if hasattr(x, "__cuda_array_interface__") and not isinstance(x, jax.Array):
-        return jnp.from_dlpack(x)
-    return x
-
-
-def _adopt_inputs(inputs: InputSchema) -> InputSchema:
-    return inputs.model_copy(update={k: _adopt(v) for k, v in inputs})
-
-
-# --- 4. Endpoints ---
+# --- 3. Endpoints ---
 def apply(inputs: InputSchema) -> OutputSchema:
-    return OutputSchema(**jax_apply(apply_jit, _adopt_inputs(inputs)))
+    return OutputSchema(**jax_apply(apply_jit, inputs))
 
 
 def jacobian(
@@ -122,7 +109,7 @@ def jacobian(
     jac_inputs: set[str],
     jac_outputs: set[str],
 ):
-    return jax_jacobian(apply_jit, _adopt_inputs(inputs), jac_inputs, jac_outputs)
+    return jax_jacobian(apply_jit, inputs, jac_inputs, jac_outputs)
 
 
 def jacobian_vector_product(
@@ -131,10 +118,7 @@ def jacobian_vector_product(
     jvp_outputs: set[str],
     tangent_vector: dict[str, Any],
 ):
-    tangent_vector = {k: _adopt(v) for k, v in tangent_vector.items()}
-    return jax_jvp(
-        apply_jit, _adopt_inputs(inputs), jvp_inputs, jvp_outputs, tangent_vector
-    )
+    return jax_jvp(apply_jit, inputs, jvp_inputs, jvp_outputs, tangent_vector)
 
 
 def vector_jacobian_product(
@@ -143,10 +127,7 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ):
-    cotangent_vector = {k: _adopt(v) for k, v in cotangent_vector.items()}
-    return jax_vjp(
-        apply_jit, _adopt_inputs(inputs), vjp_inputs, vjp_outputs, cotangent_vector
-    )
+    return jax_vjp(apply_jit, inputs, vjp_inputs, vjp_outputs, cotangent_vector)
 
 
 def abstract_eval(abstract_inputs):

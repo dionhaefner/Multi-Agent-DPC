@@ -101,7 +101,7 @@ def train_step(params, opt_state, z_init_batch, xi_init_batch, z_target_batch, d
 with solver_ts:
     # here's the thing: if we set use_tesseract=False, the dynamics will use JAX backend for differentiation and that takes a couple of minutes on a rtx5090
     # but using the tesseract (use_tesseract=True) for differentiation is much slower due to the overhead of communication (on pietro's laptop that is around 4 minutes per iteration, which is not feasible for training)
-    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True, gpu_transport=GPU_TRANSPORT) # One can use JAX in our case for the training
+    dynamics = PDEDynamics(solver_ts, policy_apply_fn=model.apply, use_tesseract=True) # One can use JAX in our case for the training
 
     print("Generating dataset...")
     all_keys = jax.random.split(key, 5000)
