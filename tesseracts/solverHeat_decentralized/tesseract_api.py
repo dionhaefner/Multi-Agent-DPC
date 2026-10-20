@@ -38,8 +38,9 @@ _PARAM_SIZE = _INITIAL_FLAT.size
 
 # Every gradient evaluation through Tesseract-JAX calls apply and then
 # vector_jacobian_product on the same inputs. Caching the residuals of the forward
-# pass lets the VJP skip rerunning the 300-step rollout. Set to 0 to disable.
-set_jax_vjp_cache_size(1)
+# pass lets the VJP skip rerunning the 300-step rollout. Set VJP_CACHE_SIZE=0 in
+# the environment to disable it.
+set_jax_vjp_cache_size(int(os.environ.get("VJP_CACHE_SIZE", "1")))
 
 
 # --- 1. Schemata ---
