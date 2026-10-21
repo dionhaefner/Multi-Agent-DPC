@@ -1,5 +1,5 @@
 """
-Times one training step of train.py with the solver called in four different ways.
+Times one training step of train.py with the solver called in five different ways.
 
     python benchmark.py                  # all setups, 3 fresh processes each
     python benchmark.py --processes 5 --steps 100
@@ -11,8 +11,10 @@ step is printed as a check that all setups train the same way.
 
 Setups:
   direct          solver imported in this process (use_tesseract=False)
-  host            solver served by Tesseract.from_source, arrays through host memory
-  cuda_ipc        same, arrays passed as CUDA IPC handles, VJP cache off
+  host            solver served by Tesseract.from_source, arrays through host memory,
+                  VJP cache off
+  host+cache      same, with the Tesseract's VJP cache (its default)
+  cuda_ipc        same as host, arrays passed as CUDA IPC handles, VJP cache off
   cuda_ipc+cache  same, with the Tesseract's VJP cache (its default)
 """
 import os
@@ -36,12 +38,14 @@ SETUPS = {
     # name: (use_tesseract, gpu_transport, VJP cache size)
     "direct": (False, None, None),
     "host": (True, "none", "0"),
+    "host+cache": (True, "none", "1"),
     "cuda_ipc": (True, "cuda_ipc", "0"),
     "cuda_ipc+cache": (True, "cuda_ipc", "1"),
 }
 LABELS = {
     "direct": "Solver imported directly, one process",
     "host": "Solver in its own process, arrays through host memory",
+    "host+cache": "Same, with the solver's VJP cache",
     "cuda_ipc": "Solver in its own process, cuda_ipc",
     "cuda_ipc+cache": "Same, with the solver's VJP cache",
 }
